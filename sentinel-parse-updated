@@ -1,6 +1,6 @@
 import re
 
-# Updated order with 'id' instead of 'name'
+# GUI-based key order (name replaced by id)
 DESIRED_KEY_ORDER = [
     "display_name",
     "description",
@@ -39,10 +39,13 @@ def indent_heredoc_closers(lines):
                 result.append(line)
     return result
 
-def align_equals_globally(lines):
-    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
+def align_block_kv(lines):
+    """
+    Align all key=value lines within contiguous blocks of key-value assignments (handles nested too).
+    """
     result = []
     group = []
+    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
 
     def flush_group():
         if not group:
@@ -79,20 +82,16 @@ def reorder_keys_in_block(block: str) -> str:
         if match:
             indent, key, value = match.groups()
             if key == "name":
-                name_key = key
                 name_value = value.strip()
                 insert_indent = indent
-                # Skip "name" — we're removing it
-                continue
+                continue  # Remove "name"
             kv_lines[key] = (indent, key, value.strip())
         else:
             other_lines.append(line)
 
-    # If "name" existed, inject "id" with the same value
     if name_value:
         kv_lines["id"] = (insert_indent, "id", name_value)
 
-    # Align and reorder
     max_key_len = max((len(k) for k in kv_lines), default=0)
     formatted_lines = []
 
@@ -115,19 +114,28 @@ def format_tf_file(filepath: str):
     with open(filepath, 'r') as f:
         content = f.read()
 
+    # Step 1: Fix heredoc start tags
     updated = add_dash_to_heredocs(content)
+
+    # Step 2: Reorder GUI keys and replace "name" with "id"
     blocks = re.split(r'(?<=})\n', updated)
     reordered_blocks = [reorder_keys_in_block(block) for block in blocks]
     combined = '\n'.join(reordered_blocks)
+
+    # Step 3: Break into lines
     lines = combined.splitlines()
 
+    # Step 4: Indent heredoc closers
     lines = indent_heredoc_closers(lines)
-    lines = align_equals_globally(lines)
 
+    # Step 5: Align key = value inside all blocks
+    lines = align_block_kv(lines)
+
+    # Step 6: Write final output
     with open(filepath, 'w') as f:
         f.write('\n'.join(lines))
 
-    print("✅ 'name' replaced by 'id', GUI order applied, heredocs & alignment fixed.")
+    print("✅ Fully aligned nested blocks, GUI field order, heredocs, and id replacement done.")
 
 if __name__ == "__main__":
     format_tf_file("sentinel.tf")
