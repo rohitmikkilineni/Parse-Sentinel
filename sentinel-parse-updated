@@ -1,21 +1,13 @@
 import re
 
+# Updated order with 'id' instead of 'name'
 DESIRED_KEY_ORDER = [
-    "for_each",
-    "name",
     "display_name",
     "description",
+    "id",
     "log_analytics_workspace_id",
     "severity",
-    "tactics",
-    "query_frequency",
-    "query_period",
-    "query",
-    "enabled",
-    "suppression_duration",
-    "suppression_enabled",
-    "trigger_operator",
-    "trigger_threshold"
+    "tactics"
 ]
 
 def add_dash_to_heredocs(text: str) -> str:
@@ -71,32 +63,71 @@ def align_equals_globally(lines):
     flush_group()
     return result
 
-def format_block(block: str) -> str:
-    return block  # Now doing full formatting in final pass only
+def reorder_keys_in_block(block: str) -> str:
+    lines = block.splitlines()
+    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
+
+    kv_lines = {}
+    other_lines = []
+
+    name_key = None
+    name_value = None
+    insert_indent = "  "
+
+    for line in lines:
+        match = kv_pattern.match(line)
+        if match:
+            indent, key, value = match.groups()
+            if key == "name":
+                name_key = key
+                name_value = value.strip()
+                insert_indent = indent
+                # Skip "name" — we're removing it
+                continue
+            kv_lines[key] = (indent, key, value.strip())
+        else:
+            other_lines.append(line)
+
+    # If "name" existed, inject "id" with the same value
+    if name_value:
+        kv_lines["id"] = (insert_indent, "id", name_value)
+
+    # Align and reorder
+    max_key_len = max((len(k) for k in kv_lines), default=0)
+    formatted_lines = []
+
+    for key in DESIRED_KEY_ORDER:
+        if key in kv_lines:
+            indent, k, v = kv_lines[key]
+            padding = ' ' * (max_key_len - len(k))
+            formatted_lines.append(f"{indent}{k}{padding} = {v}")
+
+    for key in kv_lines:
+        if key not in DESIRED_KEY_ORDER:
+            indent, k, v = kv_lines[key]
+            padding = ' ' * (max_key_len - len(k))
+            formatted_lines.append(f"{indent}{k}{padding} = {v}")
+
+    formatted_lines.extend(other_lines)
+    return '\n'.join(formatted_lines)
 
 def format_tf_file(filepath: str):
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # Step 1: Fix heredocs
     updated = add_dash_to_heredocs(content)
-
-    # Step 2: Keep blocks intact but rejoin
     blocks = re.split(r'(?<=})\n', updated)
-    combined = '\n'.join(blocks)
+    reordered_blocks = [reorder_keys_in_block(block) for block in blocks]
+    combined = '\n'.join(reordered_blocks)
     lines = combined.splitlines()
 
-    # Step 3: Fix heredoc closers
     lines = indent_heredoc_closers(lines)
-
-    # Step 4: Align all '=' signs globally
     lines = align_equals_globally(lines)
 
-    # Step 5: Write back
     with open(filepath, 'w') as f:
         f.write('\n'.join(lines))
 
-    print("✅ Global formatting applied: heredocs, indentation, and '=' alignment.")
+    print("✅ 'name' replaced by 'id', GUI order applied, heredocs & alignment fixed.")
 
 if __name__ == "__main__":
     format_tf_file("sentinel.tf")
