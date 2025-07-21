@@ -1,0 +1,102 @@
+import re
+
+DESIRED_KEY_ORDER = [
+    "for_each",
+    "name",
+    "display_name",
+    "description",
+    "log_analytics_workspace_id",
+    "severity",
+    "tactics",
+    "query_frequency",
+    "query_period",
+    "query",
+    "enabled",
+    "suppression_duration",
+    "suppression_enabled",
+    "trigger_operator",
+    "trigger_threshold"
+]
+
+def add_dash_to_heredocs(text: str) -> str:
+    return re.sub(r'(<<)([A-Z]+)', r'\1-\2', text)
+
+def indent_heredoc_closers(lines):
+    result = []
+    heredoc_indent = None
+    heredoc_tag = None
+    inside_heredoc = False
+
+    heredoc_start_pattern = re.compile(r'^(\s*[a-zA-Z0-9_]+\s*=\s*<<-?)([A-Z]+)')
+
+    for line in lines:
+        if not inside_heredoc:
+            match = heredoc_start_pattern.search(line)
+            if match:
+                heredoc_tag = match.group(2)
+                heredoc_indent = re.match(r'^(\s*)', line).group(1)
+                inside_heredoc = True
+            result.append(line)
+        else:
+            if line.strip() == heredoc_tag:
+                result.append(f"{heredoc_indent}{heredoc_tag}")
+                inside_heredoc = False
+                heredoc_tag = None
+                heredoc_indent = None
+            else:
+                result.append(line)
+    return result
+
+def align_equals_globally(lines):
+    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
+    result = []
+    group = []
+
+    def flush_group():
+        if not group:
+            return
+        max_key_len = max(len(k[1]) for k in group)
+        for indent, key, val in group:
+            padding = ' ' * (max_key_len - len(key))
+            result.append(f"{indent}{key}{padding} = {val}")
+        group.clear()
+
+    for line in lines:
+        match = kv_pattern.match(line)
+        if match:
+            group.append((match.group(1), match.group(2), match.group(3).strip()))
+        else:
+            flush_group()
+            result.append(line)
+    flush_group()
+    return result
+
+def format_block(block: str) -> str:
+    return block  # Now doing full formatting in final pass only
+
+def format_tf_file(filepath: str):
+    with open(filepath, 'r') as f:
+        content = f.read()
+
+    # Step 1: Fix heredocs
+    updated = add_dash_to_heredocs(content)
+
+    # Step 2: Keep blocks intact but rejoin
+    blocks = re.split(r'(?<=})\n', updated)
+    combined = '\n'.join(blocks)
+    lines = combined.splitlines()
+
+    # Step 3: Fix heredoc closers
+    lines = indent_heredoc_closers(lines)
+
+    # Step 4: Align all '=' signs globally
+    lines = align_equals_globally(lines)
+
+    # Step 5: Write back
+    with open(filepath, 'w') as f:
+        f.write('\n'.join(lines))
+
+    print("✅ Global formatting applied: heredocs, indentation, and '=' alignment.")
+
+if __name__ == "__main__":
+    format_tf_file("sentinel.tf")
