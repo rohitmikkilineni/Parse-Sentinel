@@ -1,130 +1,150 @@
 import re
+from pathlib import Path
 
-# Ordered keys (for top-level ordering only)
-DESIRED_KEY_ORDER = [
-    "for_each",
+# Define the desired order of keys to match the Sentinel GUI.
+# Keys not in this list will be placed at the end.
+KEY_ORDER = [
+    "log_analytics_workspace_id",
     "name",
     "display_name",
     "description",
-    "log_analytics_workspace_id",
     "severity",
+    "enabled",
     "tactics",
     "query_frequency",
     "query_period",
-    "query",
-    "enabled",
-    "suppression_duration",
-    "suppression_enabled",
     "trigger_operator",
-    "trigger_threshold"
+    "trigger_threshold",
+    "suppression_enabled",
+    "suppression_duration",
+    "query",
 ]
 
 def add_dash_to_heredocs(text: str) -> str:
+    """Replaces <<WORD with <<-WORD to allow indented heredocs."""
     return re.sub(r'(<<)([A-Z]+)', r'\1-\2', text)
 
-def indent_heredoc_closers(lines):
-    result = []
-    heredoc_indent = None
-    heredoc_tag = None
-    inside_heredoc = False
-
-    heredoc_start_pattern = re.compile(r'^(\s*[a-zA-Z0-9_]+\s*=\s*<<-?)([A-Z]+)')
-
-    for line in lines:
-        if not inside_heredoc:
-            match = heredoc_start_pattern.search(line)
-            if match:
-                heredoc_tag = match.group(2)
-                heredoc_indent = re.match(r'^(\s*)', line).group(1)
-                inside_heredoc = True
-            result.append(line)
-        else:
-            if line.strip() == heredoc_tag:
-                result.append(f"{heredoc_indent}{heredoc_tag}")
-                inside_heredoc = False
-                heredoc_tag = None
-                heredoc_indent = None
-            else:
-                result.append(line)
-    return result
-
-def align_kv_lines(lines):
-    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
-    result = []
-    group = []
-
-    def flush_group():
-        if not group:
-            return
-        max_key_len = max(len(k[1]) for k in group)
-        for indent, key, val in group:
-            padding = ' ' * (max_key_len - len(key))
-            result.append(f"{indent}{key}{padding} = {val}")
-        group.clear()
-
-    for line in lines:
-        match = kv_pattern.match(line)
-        if match:
-            group.append((match.group(1), match.group(2), match.group(3).strip()))
-        else:
-            flush_group()
-            result.append(line)
-    flush_group()
-    return result
-
 def format_block(block: str) -> str:
-    lines = block.splitlines()
-    kv_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.+)$')
+    """
+    Orders keys according to KEY_ORDER and aligns the '=' sign for assignments.
+    """
+    lines = block.strip().splitlines()
+    if not lines:
+        return ""
 
-    kv_lines = {}
-    other_lines = []
+    # --- 1. Group lines into "entries" (an entry is a full assignment or a comment block) ---
+    entries = []
+    current_entry_lines = []
+    in_heredoc = False
+    heredoc_terminator = None
+    kv_pattern = re.compile(r'^\s*([a-zA-Z0-9_]+)\s*=')
+    heredoc_start_pattern = re.compile(r'.*<<-?([A-Z]+)')
 
     for line in lines:
-        match = kv_pattern.match(line)
+        is_kv_start = kv_pattern.match(line) and not in_heredoc
+
+        if is_kv_start:
+            if current_entry_lines:
+                entries.append("\n".join(current_entry_lines))
+            current_entry_lines = [line]
+            heredoc_match = heredoc_start_pattern.match(line)
+            if heredoc_match:
+                in_heredoc = True
+                heredoc_terminator = heredoc_match.group(1)
+        else:
+            current_entry_lines.append(line)
+            if in_heredoc and line.strip() == heredoc_terminator:
+                in_heredoc = False
+    
+    if current_entry_lines:
+        entries.append("\n".join(current_entry_lines))
+
+    # --- 2. Separate assignments from other content (comments, braces) ---
+    assignments = {}
+    other_content = []
+    block_header = ""
+    block_footer = ""
+
+    for entry in entries:
+        # Check if the entry is an assignment
+        match = kv_pattern.match(entry)
+        if match:
+            key = match.group(1)
+            assignments[key] = entry
+        # Separate the main resource block braces
+        elif "{" in entry:
+            block_header = entry
+        elif "}" in entry:
+            block_footer = entry
+        else:
+            other_content.append(entry)
+
+    # --- 3. Sort the assignments based on KEY_ORDER ---
+    def get_sort_key(key):
+        return KEY_ORDER.index(key) if key in KEY_ORDER else len(KEY_ORDER)
+
+    sorted_keys = sorted(assignments.keys(), key=get_sort_key)
+    sorted_assignments = [assignments[key] for key in sorted_keys]
+
+    # --- 4. Align the '=' signs in the sorted assignments ---
+    lines_to_align = other_content + sorted_assignments
+    max_key_len = 0
+    align_pattern = re.compile(r'^(\s*)([a-zA-Z0-9_]+)\s*=\s*(.*)')
+
+    # Find the longest key among single-line assignments for alignment
+    for line in lines_to_align:
+        if '\n' not in line: # Only check single-line entries
+            match = align_pattern.match(line)
+            if match:
+                max_key_len = max(max_key_len, len(match.group(2)))
+
+    # Format the lines with aligned spacing
+    formatted_lines = []
+    for entry in lines_to_align:
+        if '\n' in entry: # It's a multi-line entry (like a heredoc or comment block)
+            formatted_lines.append(entry)
+            continue
+        
+        match = align_pattern.match(entry)
         if match:
             indent, key, value = match.groups()
-            kv_lines[key] = (indent, key, value.strip())
-        else:
-            other_lines.append(line)
+            padding = ' ' * (max_key_len - len(key))
+            formatted_lines.append(f"{indent}{key}{padding} = {value.strip()}")
+        else: # It's a comment or blank line
+            formatted_lines.append(entry)
 
-    max_key_len = max((len(k) for k in kv_lines), default=0)
-    formatted_lines = []
+    # --- 5. Reassemble the final block ---
+    final_block_parts = [block_header] + formatted_lines + [block_footer]
+    return "\n".join(filter(None, final_block_parts))
 
-    for key in DESIRED_KEY_ORDER:
-        if key in kv_lines:
-            indent, k, v = kv_lines[key]
-            padding = ' ' * (max_key_len - len(k))
-            formatted_lines.append(f"{indent}{k}{padding} = {v}")
-
-    for key in kv_lines:
-        if key not in DESIRED_KEY_ORDER:
-            indent, k, v = kv_lines[key]
-            padding = ' ' * (max_key_len - len(k))
-            formatted_lines.append(f"{indent}{k}{padding} = {v}")
-
-    formatted_lines.extend(other_lines)
-
-    # Align all blocks (including nested ones)
-    formatted_lines = align_kv_lines(formatted_lines)
-
-    # Fix closing heredoc indent
-    formatted_lines = indent_heredoc_closers(formatted_lines)
-
-    return '\n'.join(formatted_lines)
 
 def format_tf_file(filepath: str):
-    with open(filepath, 'r') as f:
-        content = f.read()
+    """
+    Reads a Terraform file, formats it, and writes the changes back.
+    """
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"❌ Error: The file '{filepath}' was not found.")
+        return
 
-    updated = add_dash_to_heredocs(content)
-    blocks = re.split(r'(?<=})\n', updated)
-    formatted_blocks = [format_block(block) for block in blocks]
-    formatted_content = '\n'.join(formatted_blocks)
+    # Step 1: Add dash to heredocs
+    updated_content = add_dash_to_heredocs(content)
+
+    # Step 2: Split content into blocks and format each one
+    # The regex splits the file after a closing brace '}' followed by newlines
+    blocks = re.split(r'(?<=\})\s*\n', updated_content)
+    formatted_blocks = [format_block(block) for block in blocks if block.strip()]
+    
+    # Join the formatted blocks with two newlines for readability
+    final_content = '\n\n'.join(formatted_blocks)
 
     with open(filepath, 'w') as f:
-        f.write(formatted_content)
+        f.write(final_content)
 
-    print("✅ All formatting applied: GUI key order, heredoc dashes, indent fix, and nested `=` alignment.")
+    print(f"✅ Successfully formatted '{filepath}': Ordered keys, aligned assignments, and updated heredocs.")
 
 if __name__ == "__main__":
-    format_tf_file("sentinel.tf")
+    # You can change this to the actual path of your file
+    format_tf_file("sentinel-rules.tf")
