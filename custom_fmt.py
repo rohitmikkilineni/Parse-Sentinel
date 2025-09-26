@@ -2,15 +2,15 @@ import re
 
 def reorder_resource_properties(content: str) -> str:
     """
-    Reorders properties in Terraform resource blocks.
+    Reorders properties in Terraform resource blocks, including nested blocks recursively.
     """
-    # --- CHANGE HIGHLIGHT: Replaced with manager's full array, split into hierarchical orders for top-level and nested to avoid errors and handle skipping absent keys correctly ---
+    # --- CHANGE: Updated preferred order to match manager's full array, split hierarchically for top-level and nested blocks ---
     top_order = ["log_analytics_workspace_id", "alert_rule_template_guid", "alert_rule_template_version", "name", "display_name", "description", "severity", "tactics", "techniques", "enabled", "entity_mapping", "sentinel_entity_mapping", "custom_details", "alert_details_override", "query_frequency", "query_period", "trigger_operator", "trigger_threshold", "event_grouping", "suppression_enabled", "suppression_duration", "incident_configuration", "query"]
     nested_orders = {
         "incident_configuration": ["create_incident", "grouping"],
         "grouping": ["enabled", "lookback_duration", "entity_matching_method", "group_by_entities", "reopen_closed_incidents"]
     }
-    # --- END CHANGE HIGHLIGHT ---
+    # --- END CHANGE ---
 
     lines = content.splitlines()
     output = []
@@ -31,21 +31,22 @@ def reorder_resource_properties(content: str) -> str:
            
             # End of resource block
             if brace_count == 0:
-                # --- CHANGE HIGHLIGHT: Call the new recursive reorder_block to handle nested structures and prevent repetition at the end ---
-                reordered_lines = reorder_block(resource_lines, top_order, nested_orders)
+                # --- CHANGE HIGHLIGHT: Process only content between { and } to avoid including declaration/closing in reordering, preventing repetition ---
+                reordered_content = reorder_block(resource_lines[1:-1], top_order, nested_orders)
+                output.append(resource_lines[0])  # Add declaration
+                output.extend(reordered_content)
+                output.append(resource_lines[-1])  # Add closing
                 # --- END CHANGE HIGHLIGHT ---
-                output.extend(reordered_lines)
                 inside_resource = False
             continue
         # Outside resource, just append
         output.append(line)
     return "\n".join(output)
 
-# --- CHANGE HIGHLIGHT: Added recursive helper function to reorder blocks (top-level and nested), preventing repetition by properly capturing and reconstructing nested content ---
 def reorder_block(block_lines: list, order: list, nested_orders: dict) -> list:
     reordered_lines = []
     other_lines = []
-    i = 0  # Process from start, as sub-blocks lack declaration
+    i = 0
     while i < len(block_lines):
         l = block_lines[i]
         prop_match = re.match(r'\s*(\w+)\s*=', l)
@@ -60,36 +61,35 @@ def reorder_block(block_lines: list, order: list, nested_orders: dict) -> list:
                 sub_block_lines.append(current)
                 sub_brace_count += current.count('{') - current.count('}')
                 i += 1
-            # Recurse on sub-block content
             sub_order = nested_orders.get(prop_name, [])
-            formatted_sub = reorder_block(sub_block_lines[1:-1], sub_order, nested_orders)  # Exclude { and }
+            formatted_sub = reorder_block(sub_block_lines[1:-1], sub_order, nested_orders)
             sub_block = [sub_block_lines[0]] + formatted_sub + [sub_block_lines[-1]]
             if prop_name in order:
                 reordered_lines.append((order.index(prop_name), sub_block))
             else:
                 other_lines.append(sub_block)
             continue
-        if prop_match:
+        elif prop_match:
             prop_name = prop_match.group(1)
-            block_lines_prop = [l]
+            block_content = [l]
             i += 1
-            if "<<-" in l or "<<" in l:
-                delimiter = re.search(r'<<-?([A-Z0-9_]+)', l).group(1)
-                while i < len(block_lines):
-                    block_lines_prop.append(block_lines[i])
-                    if block_lines[i].strip() == delimiter:
+            if '<<' in l:
+                delimiter_match = re.search(r'<<-?([A-Z0-9_]+)', l)
+                if delimiter_match:
+                    delimiter = delimiter_match.group(1)
+                    while i < len(block_lines):
+                        block_content.append(block_lines[i])
+                        if block_lines[i].strip() == delimiter:
+                            i += 1
+                            break
                         i += 1
-                        break
-                    i += 1
             if prop_name in order:
-                reordered_lines.append((order.index(prop_name), block_lines_prop))
+                reordered_lines.append((order.index(prop_name), block_content))
             else:
-                other_lines.append(block_lines_prop)
+                other_lines.append(block_content)
             continue
         other_lines.append([l])
         i += 1
-
-    # Sort and flatten, skipping absent
     reordered_lines.sort(key=lambda x: x[0])
     flat_lines = []
     for _, lines_block in reordered_lines:
@@ -97,7 +97,6 @@ def reorder_block(block_lines: list, order: list, nested_orders: dict) -> list:
     for lines_block in other_lines:
         flat_lines.extend(lines_block)
     return flat_lines
-# --- END CHANGE HIGHLIGHT ---
 
 def align_key_value_pairs(content: str) -> str:
     """
@@ -107,15 +106,18 @@ def align_key_value_pairs(content: str) -> str:
     formatted_lines = []
     block = []
     max_key_length = 0
+    # Match only the first "=" (not "=="), splitting key from value
     kv_pattern = re.compile(r'^(\s*)(\w+)\s*=\s+(.*)$')
     for line in lines:
         kv_match = kv_pattern.match(line)
         if kv_match:
             indent, key, value = kv_match.groups()
+            # Exclude lines that *start* with something like "if (...) ==" (heredoc code)
             if not key.startswith("if") and not key.endswith("=="):
                 block.append((indent, key, value))
                 max_key_length = max(max_key_length, len(key))
                 continue
+        # Flush current block if exists
         if block:
             for indent, key, value in block:
                 spaces = ' ' * (max_key_length - len(key))
@@ -123,6 +125,7 @@ def align_key_value_pairs(content: str) -> str:
             block = []
             max_key_length = 0
         formatted_lines.append(line)
+    # Flush any remaining block
     if block:
         for indent, key, value in block:
             spaces = ' ' * (max_key_length - len(key))
